@@ -2,6 +2,8 @@
 /src-tauri/target/
 /.DS_Store
 /src-tauri/gen/
+/assets/
+/docs/
 /web/.DS_Store
 *.log
 .env

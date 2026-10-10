@@ -6,8 +6,6 @@
 > v0.1.0：macOS API 版已可本地构建和运行。尚未提供经过 Apple Developer ID
 > 签名与公证的发行包。
 
-![RustTide macOS 翻译工作台](docs/screenshots/macos.png)
-
 ## 首版范围
 
 - macOS 选中文字取词，支持辅助功能 API 与剪贴板取词。
@@ -79,10 +77,6 @@ Tauri 使用系统 WebView，无需独立浏览器运行时或本地 HTTP 服务
 
 原文只在主动翻译时发给配置的 API。本应用不保存翻译历史，不记录密钥或
 原文日志。服务商对请求数据的处理由其自己的政策决定。
-
-开发与验证细节见 [验证记录](docs/verification.md)。
-
-详细范围见 [实施计划](docs/implementation-plan.md)。
 
 ## 许可证与致谢
 
