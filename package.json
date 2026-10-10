@@ -1,0 +1,17 @@
+{
+  "name": "rusttide",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "macOS text translation and replacement, powered by Rust and Tauri",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build --bundles app",
+    "test": "node --test web/model.test.js",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.1"
+  }
+}

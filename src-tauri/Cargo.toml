@@ -1,0 +1,32 @@
+[package]
+name = "rusttide"
+version = "0.1.0"
+description = "macOS API-powered text translation and replacement"
+authors = ["yadasu-36"]
+edition = "2021"
+license = "MIT"
+rust-version = "1.90"
+
+[lib]
+name = "rusttide_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+cc = "1.2"
+
+[dependencies]
+tauri = { version = "2.10", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "net", "io-util"] }
+tokio-util = "0.7"
+url = "2"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
