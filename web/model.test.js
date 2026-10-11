@@ -1,30 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {initialState, editSource, canReplace, acceptResult, operation} from './model.js';
-test('editing source detaches the original capture target', () => {
-  const capture = {...initialState(), source:'原文', result:'translation', captureId:1, replaceable:true};
-  assert.equal(canReplace(capture), true);
-  const edited = editSource(capture, '修改后的原文');
-  assert.equal(canReplace(edited), false);
-  assert.equal(edited.captureId, null);
+import {fields, settingsFromForm, shortcutLabel} from './model.js';
+test('saving input preferences preserves the API and independent shortcut actions', () => {
+  const current = {baseUrl:'https://api.example.com/v1', model:'custom', timeoutSeconds:45,
+    nativeLanguage:'简体中文', foreignLanguage:'English', style:'formal', readShortcut:'Alt+D', replaceShortcut:'Alt+R',
+    readDirection:'native', writeDirection:'foreign', readOutput:'popup', writeOutput:'replace'};
+  const values = Object.fromEntries(Object.entries(fields).map(([id,key]) => [id,current[key]]));
+  Object.assign(values, {'write-output':'popup','clipboard-fallback':true,'system-proxy':false,'excluded-apps':' com.example.Editor\n\ncom.example.Passwords '});
+  const next = settingsFromForm(current, values);
+  assert.equal(next.baseUrl, current.baseUrl);
+  assert.equal(next.readOutput, 'popup');
+  assert.equal(next.writeOutput, 'popup');
+  assert.equal(next.writeDirection, 'foreign');
+  assert.deepEqual(next.excludedApps, ['com.example.Editor','com.example.Passwords']);
+  assert.equal(next.timeoutSeconds,45);
+  assert.equal(next.clipboardFallback,true);
+  assert.equal(next.useSystemProxy,false);
+  assert.equal(next.apiKey,undefined);
 });
-test('late response cannot overwrite edited source session', () => {
-  const before = initialState();
-  const after = editSource(before, 'new text');
-  assert.equal(acceptResult(after, before.revision, 'late result'), after);
-});
-test('direct replacement stays busy until paste finishes', () => {
-  let state = operation(initialState(), {kind:'started'});
-  state = operation(state, {kind:'captured', source:'你好', captureId:3, replaceable:true, app:'Fixture'});
-  state = operation(state, {kind:'translated', result:'Hello', captureId:3, direct:true});
-  assert.equal(state.busy, true);
-  assert.equal(canReplace(state), false);
-  state = operation(state, {kind:'replaced', verified:true});
-  assert.equal(state.busy, false);
-  assert.equal(state.captureId, null);
-});
-test('unrelated capture response is ignored and errors allow retry', () => {
-  const state = {...initialState(), captureId:9, busy:true};
-  assert.equal(operation(state, {kind:'translated', captureId:8, result:'stale'}), state);
-  assert.equal(operation(state, {kind:'error'}).busy, false);
+test('custom shortcuts render the actual saved macOS combinations', () => {
+  assert.equal(shortcutLabel('Command+Shift+T'),'⌘ ⇧ T');
+  assert.equal(shortcutLabel('Alt+R'),'⌥ R');
 });

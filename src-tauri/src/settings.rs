@@ -18,33 +18,59 @@ pub const LANGUAGES: &[&str] = &[
 ];
 pub const STYLES: &[&str] = &["natural", "formal", "concise"];
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Direction {
+    #[default]
+    Auto,
+    Native,
+    Foreign,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Output {
+    Popup,
+    Replace,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub base_url: String,
     pub model: String,
-    pub target_language: String,
+    pub native_language: String,
+    #[serde(alias = "targetLanguage")]
+    pub foreign_language: String,
+    pub read_direction: Direction,
+    pub write_direction: Direction,
+    pub read_output: Output,
+    pub write_output: Output,
     pub style: String,
     pub timeout_seconds: u64,
     pub read_shortcut: String,
     pub replace_shortcut: String,
     pub clipboard_fallback: bool,
-    pub capture_whole_input: bool,
     pub use_system_proxy: bool,
+    pub excluded_apps: Vec<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4o-mini".into(),
-            target_language: "English".into(),
+            native_language: "简体中文".into(),
+            foreign_language: "English".into(),
+            read_direction: Direction::Auto,
+            write_direction: Direction::Auto,
+            read_output: Output::Popup,
+            write_output: Output::Replace,
             style: "natural".into(),
             timeout_seconds: 45,
             read_shortcut: "Alt+D".into(),
             replace_shortcut: "Alt+R".into(),
             clipboard_fallback: true,
-            capture_whole_input: false,
             use_system_proxy: true,
+            excluded_apps: vec![],
         }
     }
 }
@@ -84,10 +110,33 @@ impl Settings {
         if self.model.is_empty() || self.model.len() > 200 {
             return Err("请填写有效的模型名称。".into());
         }
-        if !LANGUAGES.contains(&self.target_language.as_str())
+        if !LANGUAGES.contains(&self.native_language.as_str())
+            || !LANGUAGES.contains(&self.foreign_language.as_str())
             || !STYLES.contains(&self.style.as_str())
         {
             return Err("语言或翻译风格不受支持。".into());
+        }
+        if self.native_language == self.foreign_language {
+            return Err("母语和外语需要选择不同的语言。".into());
+        }
+        self.excluded_apps = self
+            .excluded_apps
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect();
+        self.excluded_apps.sort();
+        self.excluded_apps.dedup();
+        if self.excluded_apps.len() > 100
+            || self.excluded_apps.iter().any(|id| {
+                id.len() > 200
+                    || !id.contains('.')
+                    || !id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+            })
+        {
+            return Err("排除应用需要填写有效的 Bundle ID，每行一个。".into());
         }
         if !(5..=120).contains(&self.timeout_seconds) {
             return Err("超时需要在 5–120 秒之间。".into());
@@ -102,9 +151,19 @@ impl Settings {
             return Ok(Self::default());
         }
         let data = fs::read(path).map_err(|_| "无法读取设置文件。")?;
-        let mut settings: Self =
-            serde_json::from_slice(&data).map_err(|_| "设置文件无效，请修复或删除后重启。")?;
+        let mut settings = Self::from_json(&data)?;
         settings.validate()?;
+        Ok(settings)
+    }
+    fn from_json(data: &[u8]) -> Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(data).map_err(|_| "设置文件无效，请修复或删除后重启。")?;
+        let legacy = value.get("targetLanguage").is_some() && value.get("nativeLanguage").is_none();
+        let mut settings: Self =
+            serde_json::from_value(value).map_err(|_| "设置文件无效，请修复或删除后重启。")?;
+        if legacy && settings.native_language == settings.foreign_language {
+            settings.native_language = "English".into();
+        }
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -156,7 +215,20 @@ mod tests {
         settings.timeout_seconds = 0;
         assert!(settings.validate().is_err());
         settings.timeout_seconds = 45;
-        settings.target_language = "untrusted prompt".into();
+        settings.foreign_language = "untrusted prompt".into();
         assert!(settings.validate().is_err());
+    }
+    #[test]
+    fn legacy_api_shortcuts_and_target_survive_migration() {
+        let mut settings = Settings::from_json(r#"{"baseUrl":"https://example.com/v1","model":"old-model","targetLanguage":"简体中文","readShortcut":"Alt+T","captureWholeInput":false}"#.as_bytes()).unwrap();
+        settings.validate().unwrap();
+        assert_eq!(settings.foreign_language, "简体中文");
+        assert_eq!(settings.native_language, "English");
+        assert_eq!(settings.read_shortcut, "Alt+T");
+        assert_eq!(settings.read_output, Output::Popup);
+        assert_eq!(settings.write_output, Output::Replace);
+        let value = serde_json::to_value(settings).unwrap();
+        assert!(value.get("targetLanguage").is_none());
+        assert!(value.get("captureWholeInput").is_none());
     }
 }

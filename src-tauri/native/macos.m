@@ -3,6 +3,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Security/Security.h>
 #import <CFNetwork/CFNetwork.h>
+#import <NaturalLanguage/NaturalLanguage.h>
 
 static AXUIElementRef target = NULL;
 static pid_t targetPID = 0;
@@ -128,22 +129,28 @@ char *rt_capture(int allowWhole, int allowClipboard) {
             return failure(@"请在其他应用中选中文字，再按取词快捷键。");
         targetPID = front.processIdentifier;
         target = focusedElement(targetPID);
-        if (!target) return failure(@"此应用未提供可识别的焦点，请手动粘贴到原文框。");
         if (isSecure(target)) { rt_clear_capture(); return failure(@"不能读取密码输入框。"); }
         writable = editable(target);
         hasRange = rangeOf(target, &sourceRange);
         sourceValue = stringAttribute(target, kAXValueAttribute);
         sourceText = stringAttribute(target, kAXSelectedTextAttribute);
         NSString *method = @"accessibility";
-        if (!sourceText.length && allowWhole && writable && sourceValue.length) {
+        BOOL attemptedCopy = NO;
+        // An AX selection can exist even when AXSelectedText is unsupported.
+        // Try copy before treating that selection as a whole-field rewrite.
+        if (!sourceText.length && hasRange && sourceRange.length > 0 && allowClipboard) {
+            sourceText = copySelection(); method = @"clipboard";
+            attemptedCopy = YES;
+        }
+        if (!sourceText.length && allowWhole && writable && sourceValue.length && (!hasRange || sourceRange.length == 0)) {
             sourceText = sourceValue; wholeField = YES;
         }
-        if (!sourceText.length && allowClipboard) {
+        if (!sourceText.length && allowClipboard && !attemptedCopy) {
             sourceText = copySelection(); method = @"clipboard";
         }
         // Refuse any capture performed while the user switched applications/fields.
         AXUIElementRef current = focusedElement(targetPID);
-        BOOL same = current && CFEqual(current, target) &&
+        BOOL same = ((!target && !current) || (target && current && CFEqual(current, target))) &&
             NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == targetPID;
         if (current) CFRelease(current);
         if (!same || !sourceText.length) {
@@ -162,8 +169,10 @@ char *rt_replace(const char *text) {
         if (!replacement.length) return failure(@"译文不能为空。");
         NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:targetPID];
         if (!app || app.terminated) return failure(@"原应用已退出，请重新取词。");
-        [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
-        settle(0.18);
+        // The nonactivating popup leaves focus in the source app. Never pull
+        // the user back to a different app after a slow API response.
+        if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != targetPID)
+            return failure(@"你已切换到其他应用，已停止替换。请回到原输入框重新触发。");
         AXUIElementRef current = focusedElement(targetPID);
         BOOL same = current && CFEqual(current, target) &&
             NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == targetPID;
@@ -173,7 +182,7 @@ char *rt_replace(const char *text) {
         if (sourceValue && ![sourceValue isEqualToString:value])
             return failure(@"原文已发生变化，已停止替换。请重新取词。");
         CFRange now;
-        if (!wholeField && hasRange && (!rangeOf(target, &now) || now.location != sourceRange.location || now.length != sourceRange.length))
+        if (hasRange && (!rangeOf(target, &now) || now.location != sourceRange.location || now.length != sourceRange.length))
             return failure(@"选区已发生变化，已停止替换。请重新取词。");
         NSString *selected = stringAttribute(target, kAXSelectedTextAttribute);
         if (!wholeField && !selected.length) selected = copySelection();
@@ -268,4 +277,45 @@ char *rt_system_proxy(void) {
         }
         return json(@{});
     }
+}
+
+char *rt_frontmost_bundle(void) {
+    @autoreleasepool {
+        return json(@{@"bundle":NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier ?: @""});
+    }
+}
+char *rt_detect_language(const char *text) {
+    @autoreleasepool {
+        NLLanguageRecognizer *recognizer = [NLLanguageRecognizer new];
+        [recognizer processString:[NSString stringWithUTF8String:text]];
+        return json(@{@"language":recognizer.dominantLanguage ?: @""});
+    }
+}
+
+// AX uses a top-left origin, Cocoa a bottom-left origin. Flip against the
+// primary display, not maxY across displays, so vertically stacked screens work.
+NSRect rt_capture_anchor(void) {
+    CGRect rect = CGRectZero;
+    BOOL found = NO;
+    if (target && hasRange) {
+        AXValueRef range = AXValueCreate(kAXValueCFRangeType, &sourceRange);
+        CFTypeRef value = NULL;
+        if (AXUIElementCopyParameterizedAttributeValue(target, kAXBoundsForRangeParameterizedAttribute, range, &value) == kAXErrorSuccess && value) {
+            if (CFGetTypeID(value) == AXValueGetTypeID())
+                found = AXValueGetValue((AXValueRef)value, kAXValueCGRectType, &rect) && rect.size.height > 0;
+            CFRelease(value);
+        }
+        CFRelease(range);
+    }
+    if (!found && target) {
+        id position = attribute(target, kAXPositionAttribute);
+        id size = attribute(target, kAXSizeAttribute);
+        if (position && size && CFGetTypeID((__bridge CFTypeRef)position) == AXValueGetTypeID() && CFGetTypeID((__bridge CFTypeRef)size) == AXValueGetTypeID()) {
+            found = AXValueGetValue((__bridge AXValueRef)position, kAXValueCGPointType, &rect.origin) &&
+                AXValueGetValue((__bridge AXValueRef)size, kAXValueCGSizeType, &rect.size) && rect.size.height > 0;
+        }
+    }
+    if (found) return NSMakeRect(rect.origin.x, NSScreen.screens.firstObject.frame.size.height - CGRectGetMaxY(rect), rect.size.width, rect.size.height);
+    NSPoint mouse = NSEvent.mouseLocation;
+    return NSMakeRect(mouse.x, mouse.y, 1, 18);
 }

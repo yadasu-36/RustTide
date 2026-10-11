@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>RustTide</title>
+  <title>RustTide 设置</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232864d9'/%3E%3Ctext x='12' y='46' fill='white' font-size='48'%3E%E2%89%88%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
   <script type="module" src="app.js"></script>
@@ -11,45 +11,67 @@
 <body>
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="mark" aria-hidden="true">≈</span><div><strong>RustTide</strong><small>让表达顺畅流动</small></div></div>
-      <nav aria-label="主导航">
-        <button id="tab-translate" class="nav active" aria-current="page">翻译</button>
-        <button id="tab-settings" class="nav">设置</button>
+      <div class="brand"><span class="mark" aria-hidden="true">≈</span><div><strong>RustTide</strong><small>在输入处翻译</small></div></div>
+      <nav aria-label="设置导航">
+        <button id="tab-input" class="nav active" aria-current="page">输入与翻译</button>
+        <button id="tab-api" class="nav">API 服务</button>
+        <button id="tab-system" class="nav">权限与隐私</button>
       </nav>
-      <div class="sidebar-bottom"><span class="dot"></span> macOS · API 翻译<small>v0.1.0 · MIT</small></div>
+      <div class="sidebar-bottom"><span class="dot"></span> 菜单栏助手<small>v0.2.0 · MIT</small></div>
     </aside>
     <main>
-      <header><div><span class="eyebrow">YOUR WORDS, A NEW LANGUAGE</span><h1 id="page-title">翻译工作台</h1></div><button id="permission-badge" class="badge">检查权限…</button></header>
+      <header><div><span class="eyebrow">RUSTTIDE SETTINGS</span><h1 id="page-title">输入与翻译</h1></div><button id="permission-badge" class="badge">检查权限…</button></header>
       <div id="status" class="status" role="status" aria-live="polite" hidden></div>
-      <section id="translate-panel" aria-label="翻译工作台">
-        <div class="toolbar"><label>译为 <select id="language" aria-label="目标语言"></select></label><label>风格 <select id="style" aria-label="翻译风格"><option value="natural">自然表达</option><option value="formal">正式专业</option><option value="concise">简洁明了</option></select></label><button id="capture" class="secondary">3 秒后取词</button></div>
-        <p class="guide">在其他应用中选中文字，按 <kbd id="read-hint">⌥ D</kbd> 预览翻译，或按 <kbd id="replace-hint">⌥ R</kbd> 直接翻译并替换。</p>
-        <div class="editors">
-          <div class="editor"><div class="editor-heading"><label for="source">原文</label><span id="source-count">0 字</span></div><textarea id="source" placeholder="也可以在这里输入或粘贴文字…" spellcheck="false"></textarea><div id="capture-info" class="editor-footer">手动输入 · 自动识别源语言</div></div>
-          <div class="editor result"><div class="editor-heading"><label for="result">译文</label><span id="result-count">0 字</span></div><textarea id="result" placeholder="译文会显示在这里，可继续编辑。" spellcheck="false"></textarea><div class="editor-footer">确认译文后，可复制或替换回原输入框</div></div>
-        </div>
-        <div class="actions"><div><button id="translate" class="primary">翻译</button><button id="cancel" class="secondary" hidden>取消</button></div><div><button id="copy" class="secondary" disabled>复制译文</button><button id="replace" class="secondary" disabled>替换原文</button></div></div>
-        <div class="privacy">原文只在你触发翻译时发送到所配置的 API。RustTide 不保存翻译历史。</div>
-      </section>
-      <section id="settings-panel" aria-label="设置" hidden>
-        <form id="settings-form">
-          <fieldset><legend>翻译服务</legend><p>支持 OpenAI 兼容的 chat/completions API。先保存配置，再测试连接。</p>
-            <label class="field">API 地址<input id="base-url" type="url" required placeholder="https://api.example.com/v1"><small>填写基础地址或完整 /chat/completions 地址。本机 HTTP API 也可使用。</small></label>
-            <div class="form-row"><label class="field">模型<input id="model" required placeholder="服务商提供的模型名称"></label><label class="field">超时（秒）<input id="timeout" type="number" min="5" max="120" required></label></div>
+      <form id="settings-form" novalidate>
+        <section id="input-panel" aria-label="输入与翻译">
+          <div class="flow-guide">
+            <div><span class="step">写</span><strong>在当前输入框里翻译</strong><p>输入 <span id="native-guide">母语</span>，按 <kbd id="write-hint">⌥ R</kbd>，<span id="write-effect">原地译成外语</span>。选中部分文字时只改选区。</p></div>
+            <div><span class="step">读</span><strong>翻译选中文字</strong><p>选中文字，按 <kbd id="read-hint">⌥ D</kbd>，<span id="read-effect">译文在小浮窗中显示</span>。</p></div>
+          </div>
+          <fieldset><legend>语言与表达</legend>
+            <div class="form-row"><label class="field">母语<select id="native-language"></select></label><label class="field">外语<select id="foreign-language"></select></label></div>
+            <label class="field">表达风格<select id="style"><option value="natural">自然表达</option><option value="formal">正式专业</option><option value="concise">简洁明了</option></select></label>
+            <p>智能方向会识别文字语言，在母语和外语间互译；中英混排时可以指定方向。</p>
+          </fieldset>
+          <fieldset><legend>写入快捷键</legend>
+            <label class="field">在当前输入框中触发<input id="write-shortcut" placeholder="Alt+R" aria-describedby="shortcut-help"></label>
+            <div class="form-row"><label class="field">译为<select id="write-direction"><option value="auto">智能方向</option><option value="foreign">外语</option><option value="native">母语</option></select></label><label class="field">完成后<select id="write-output"><option value="replace">直接替换输入</option><option value="popup">小浮窗预览后替换</option></select></label></div>
+            <p>无选区时读取整个可编辑输入框。替换后可在原应用中按 ⌘Z 撤销。</p>
+          </fieldset>
+          <fieldset><legend>读取快捷键</legend>
+            <label class="field">选中文字后触发<input id="read-shortcut" placeholder="Alt+D" aria-describedby="shortcut-help"></label>
+            <div class="form-row"><label class="field">译为<select id="read-direction"><option value="auto">智能方向</option><option value="native">母语</option><option value="foreign">外语</option></select></label><label class="field">完成后<select id="read-output"><option value="popup">在选区旁显示译文</option><option value="replace">直接替换（可写输入框）</option></select></label></div>
+            <small id="shortcut-help">例如 Alt+D、Command+Shift+T。两个组合需要不同；占用时会提示。</small>
+          </fieldset>
+        </section>
+        <section id="api-panel" aria-label="API 服务" hidden>
+          <p class="section-intro">支持 OpenAI 兼容的 chat/completions API，译文实时显示。保存配置后再测试。</p>
+          <fieldset><legend>翻译服务</legend>
+            <label class="field">API 地址<input id="base-url" type="url" placeholder="https://api.example.com/v1"><small>基础地址或完整 /chat/completions 地址。本机服务可使用 HTTP。</small></label>
+            <div class="form-row"><label class="field">模型<input id="model" placeholder="服务商提供的模型名称"></label><label class="field">超时（秒）<input id="timeout" type="number" min="5" max="120"></label></div>
             <label class="field">API 密钥<input id="api-key" type="password" autocomplete="new-password" placeholder="输入新密钥"><small id="key-info">密钥保存到 macOS 钥匙串。</small></label>
             <label class="check"><input id="delete-key" type="checkbox">删除此 API 地址已保存的密钥</label>
             <label class="check"><input id="system-proxy" type="checkbox">使用 macOS 系统 HTTPS 代理（本机 API 直连）</label>
           </fieldset>
-          <fieldset><legend>快捷键与取词</legend><div class="form-row"><label class="field">取词并预览<input id="read-shortcut" required placeholder="Alt+D"></label><label class="field">翻译并直接替换<input id="replace-shortcut" required placeholder="Alt+R"></label></div>
-            <small>例如 Alt+D、Command+Shift+T。快捷键冲突时会提示，保留原配置。</small>
-            <label class="check"><input id="clipboard-fallback" type="checkbox">辅助功能无法取词时，通过 ⌘C 取词并恢复剪贴板</label>
-            <label class="check"><input id="whole-input" type="checkbox">没有选区时，允许读取并替换整个可编辑输入框</label>
-            <p class="notice">直接替换会发送 ⌘V，并使用原应用的撤销功能。替换前会核对原文和焦点；不支持密码输入框。</p>
+          <button id="test-api" class="secondary" type="button">测试已保存的 API</button><button id="cancel-api" class="secondary" type="button" hidden>取消测试</button>
+          <p class="privacy">测试仅发送固定示例“你好，世界！”。真实翻译发送到你配置的服务，RustTide 不保存翻译历史。</p>
+        </section>
+        <section id="system-panel" aria-label="权限与隐私" hidden>
+          <fieldset><legend>辅助功能权限</legend>
+            <div class="permission-row"><div><strong id="permission-state">检查中…</strong><small>系统设置 → 隐私与安全性 → 辅助功能 → RustTide</small></div><button id="grant-permission" class="secondary" type="button">打开系统设置</button></div>
+            <button id="refresh-permission" class="text-button" type="button">重新检查权限</button>
           </fieldset>
-          <fieldset><legend>macOS 权限</legend><div class="permission-row"><div><strong id="permission-state">检查中…</strong><small>系统设置 → 隐私与安全性 → 辅助功能 → RustTide</small></div><button id="grant-permission" class="secondary" type="button">打开辅助功能设置</button></div><button id="refresh-permission" class="text-button" type="button">重新检查权限</button></fieldset>
-          <div class="settings-actions"><button id="save" class="primary" type="submit">保存设置</button><button id="test-api" class="secondary" type="button">测试已保存的 API</button><button id="cancel-api" class="secondary" type="button" hidden>取消测试</button></div><p class="privacy">API 测试会发送示例文字“你好，世界！”。关闭窗口后，RustTide 继续在菜单栏运行；退出请使用菜单栏中的“退出 RustTide”。</p>
-        </form>
-      </section>
+          <fieldset><legend>取词与替换</legend>
+            <label class="check"><input id="clipboard-fallback" type="checkbox">辅助功能无法读取选区时，通过 ⌘C 取词并恢复剪贴板</label>
+            <p>只在快捷键触发时读取文字。密码框不可读取；替换前核对原文和焦点，输入变化时停止替换。</p>
+          </fieldset>
+          <fieldset><legend>排除应用</legend>
+            <label class="field">这些应用中不读取文字<textarea id="excluded-apps" rows="4" placeholder="com.example.app" spellcheck="false"></textarea><small>每行填写一个应用 Bundle ID。</small></label>
+          </fieldset>
+        </section>
+        <div class="settings-actions"><button id="save" class="primary" type="submit">保存设置</button><span id="save-hint">设置关闭后，快捷键仍可使用。</span></div>
+      </form>
+      <p class="privacy">RustTide 常驻菜单栏。关闭设置即可返回输入；退出请使用菜单栏中的“退出 RustTide”。</p>
     </main>
   </div>
 </body>

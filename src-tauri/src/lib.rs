@@ -1,15 +1,17 @@
 mod native;
+mod routing;
 mod settings;
 mod translation;
 
+use routing::Trigger;
 use serde::Serialize;
 use serde_json::{json, Value};
-use settings::Settings;
+use settings::{Output, Settings};
 use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Mutex,
+        Mutex, OnceLock,
     },
 };
 use tauri::{
@@ -23,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 struct Capture {
     id: u64,
-    text: String,
+    result: Option<String>,
     replaceable: bool,
 }
 struct AppState {
@@ -44,63 +46,78 @@ impl Drop for Busy<'_> {
 }
 impl AppState {
     fn begin(&self) -> Result<(Busy<'_>, CancellationToken), String> {
+        let cancel = self.claim()?;
+        Ok((Busy(self), cancel))
+    }
+    fn claim(&self) -> Result<CancellationToken, String> {
         self.busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "当前操作尚未结束，请等待或取消。")?;
         let cancel = CancellationToken::new();
         *self.cancellation.lock().unwrap() = Some(cancel.clone());
-        Ok((Busy(self), cancel))
+        Ok(cancel)
     }
     fn settings(&self) -> Settings {
         self.settings.lock().unwrap().clone()
     }
+    fn cancel(&self) {
+        if let Some(cancel) = self.cancellation.lock().unwrap().as_ref() {
+            cancel.cancel();
+        }
+    }
 }
 fn show(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.cancel();
+        *state.capture.lock().unwrap() = None;
+    }
+    let _ = app.run_on_main_thread(native::popup_hide);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
 }
-fn event(app: &AppHandle, value: Value) {
-    let _ = app.emit("operation", value);
-}
 fn shortcuts(settings: &Settings) -> Result<(Shortcut, Shortcut), String> {
     let read: Shortcut = settings
         .read_shortcut
         .parse()
-        .map_err(|_| "取词快捷键格式无效，例如 Alt+D。")?;
-    let replace: Shortcut = settings
+        .map_err(|_| "读取快捷键格式无效，例如 Alt+D。")?;
+    let write: Shortcut = settings
         .replace_shortcut
         .parse()
-        .map_err(|_| "替换快捷键格式无效，例如 Alt+R。")?;
-    if read == replace {
+        .map_err(|_| "写入快捷键格式无效，例如 Alt+R。")?;
+    if read == write {
         return Err("两个快捷键不能相同。".into());
     }
-    // Avoid ordinary unmodified keys becoming global shortcuts.
     for raw in [&settings.read_shortcut, &settings.replace_shortcut] {
         if !raw.contains('+') {
             return Err("全局快捷键需要包含修饰键，例如 Alt+D。".into());
         }
     }
-    Ok((read, replace))
+    Ok((read, write))
 }
 fn register_shortcuts(app: &AppHandle, settings: &Settings) -> Result<(), String> {
-    let (read, replace) = shortcuts(settings)?;
+    let (read, write) = shortcuts(settings)?;
     app.global_shortcut()
         .register(read)
-        .map_err(|_| "取词快捷键注册失败，请换一个组合。")?;
-    if app.global_shortcut().register(replace).is_err() {
+        .map_err(|_| "读取快捷键注册失败，请换一个组合。")?;
+    if app.global_shortcut().register(write).is_err() {
         let _ = app.global_shortcut().unregister(read);
-        return Err("替换快捷键注册失败，请换一个组合。".into());
+        return Err("写入快捷键注册失败，请换一个组合。".into());
     }
     Ok(())
+}
+async fn popup_update(app: &AppHandle, value: Value) -> Result<(), String> {
+    native::on_main(app, move || native::popup_update(&value)).await
 }
 async fn api(
     app: &AppHandle,
     settings: Settings,
     text: &str,
+    language: &str,
     cancel: &CancellationToken,
+    popup: Option<u64>,
 ) -> Result<String, String> {
     let account = settings.key_account()?;
     let system_proxy = settings.use_system_proxy;
@@ -115,32 +132,60 @@ async fn api(
         ))
     })
     .await?;
-    translation::translate(&settings, &key, text, proxy.as_deref(), cancel).await
+    let mut last_update = std::time::Instant::now() - std::time::Duration::from_millis(40);
+    translation::translate(
+        &settings,
+        &key,
+        text,
+        language,
+        proxy.as_deref(),
+        cancel,
+        |result| {
+            if let Some(id) = popup {
+                if last_update.elapsed() < std::time::Duration::from_millis(40) {
+                    return;
+                }
+                last_update = std::time::Instant::now();
+                let payload = json!({"id":id, "kind":"stream", "result":result});
+                let _ = app.run_on_main_thread(move || {
+                    let _ = native::popup_update(&payload);
+                });
+            }
+        },
+    )
+    .await
 }
-async fn capture_flow(app: AppHandle, direct: bool, delay: bool) -> Result<(), String> {
+async fn capture_flow(
+    app: &AppHandle,
+    trigger: Trigger,
+    id: u64,
+    cancel: CancellationToken,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let (_busy, cancel) = state.begin()?;
     *state.capture.lock().unwrap() = None;
-    event(
-        &app,
-        json!({"kind":"started", "delayed":delay, "direct":direct}),
-    );
-    if delay {
-        tokio::select! {
-            _ = cancel.cancelled() => return Err("已取消。".into()),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
-        }
-    } else {
-        // Give the user time to release the shortcut modifiers before simulated copy.
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-    }
-    if cancel.is_cancelled() {
-        return Err("已取消。".into());
+    native::on_main(app, || {
+        native::popup_hide();
+        native::clear_capture();
+        Ok(())
+    })
+    .await?;
+    let _ = app.emit("operation", json!({"busy":true}));
+    // Release shortcut modifiers before a possible native copy/paste.
+    tokio::select! {
+        _ = cancel.cancelled() => return Err("已取消。".into()),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(120)) => {}
     }
     let settings = state.settings();
-    let whole = settings.capture_whole_input;
+    let whole = trigger.whole_input(&settings);
     let clipboard = settings.clipboard_fallback;
-    let capture = native::on_main(&app, move || native::capture(whole, clipboard)).await?;
+    let excluded = settings.excluded_apps.clone();
+    let capture = native::on_main(app, move || {
+        if excluded.contains(&native::frontmost_bundle()?) {
+            return Err("此应用已在排除列表中，未读取文字。".into());
+        }
+        native::capture(whole, clipboard)
+    })
+    .await?;
     if cancel.is_cancelled() {
         return Err("已取消。".into());
     }
@@ -149,58 +194,202 @@ async fn capture_flow(app: AppHandle, direct: bool, delay: bool) -> Result<(), S
         .ok_or("没有取得文字。")?
         .to_string();
     translation::validate_text(&text)?;
-    let id = state.sequence.fetch_add(1, Ordering::SeqCst) + 1;
     let replaceable = capture["replaceable"].as_bool().unwrap_or(false);
+    let to_detect = text.clone();
+    let detected = native::on_main(app, move || native::detect_language(&to_detect)).await?;
+    let language = trigger.target(&settings, &detected);
     *state.capture.lock().unwrap() = Some(Capture {
         id,
-        text: text.clone(),
+        result: None,
         replaceable,
     });
-    event(
-        &app,
-        json!({"kind":"captured", "source":text, "captureId":id,
-        "replaceable":replaceable, "app":capture["app"], "whole":capture["whole"], "method":capture["method"]}),
-    );
-    if !direct {
-        show(&app);
-    }
-    let result = api(&app, settings, &text, &cancel).await?;
+    let direct = trigger.output(&settings) == Output::Replace;
+    let payload = json!({"id":id,"source":text,"language":language,"direct":direct});
+    let token = cancel.clone();
+    native::on_main(app, move || {
+        if token.is_cancelled() {
+            return Err("已取消。".into());
+        }
+        native::popup_show(&payload)
+    })
+    .await?;
+    let result = api(app, settings, &text, &language, &cancel, Some(id)).await?;
     if cancel.is_cancelled() {
         return Err("已取消。".into());
     }
-    event(
-        &app,
-        json!({"kind":"translated", "result":result, "captureId":id, "direct":direct}),
-    );
+    if let Some(capture) = state
+        .capture
+        .lock()
+        .unwrap()
+        .as_mut()
+        .filter(|c| c.id == id)
+    {
+        capture.result = Some(result.clone());
+    }
     if direct {
         if !replaceable {
-            return Err("此处不能直接替换，译文已保留，请复制使用。".into());
+            return Err("这里不是可写输入框。译文已保留，可复制使用。".into());
         }
         let replacement = result.clone();
-        let replaced = native::on_main(&app, move || native::replace(&replacement)).await?;
+        let token = cancel.clone();
+        let replaced = native::on_main(app, move || {
+            if token.is_cancelled() {
+                return Err("已取消。".into());
+            }
+            native::replace(&replacement)
+        })
+        .await?;
         *state.capture.lock().unwrap() = None;
-        event(
-            &app,
-            json!({"kind":"replaced", "verified":replaced["verified"]}),
-        );
+        if replaced["verified"].as_bool() == Some(true) {
+            native::on_main(app, || {
+                native::popup_hide();
+                Ok(())
+            })
+            .await?;
+        } else {
+            popup_update(
+                app,
+                json!({"id":id,"kind":"error","result":result,"complete":false,"replaceable":false,
+                "message":"已发送粘贴，请在原应用确认结果；可按 ⌘Z 撤销。"}),
+            )
+            .await?;
+        }
+    } else {
+        popup_update(
+            app,
+            json!({"id":id,"kind":"done","result":result,"complete":true,"replaceable":replaceable,
+            "message":if replaceable {"翻译完成 · 可替换原选区"} else {"翻译完成 · 可复制译文"}}),
+        )
+        .await?;
     }
     Ok(())
 }
-fn start_capture(app: AppHandle, direct: bool, delay: bool) {
-    if app.state::<AppState>().busy.load(Ordering::SeqCst) {
+fn start_capture(app: AppHandle, trigger: Trigger) {
+    // Claim before spawning; a repeated shortcut must not change the active ID.
+    let state = app.state::<AppState>();
+    let Ok(cancel) = state.claim() else { return };
+    let id = state.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let busy = Busy(&state);
+        if let Err(error) = capture_flow(&app, trigger, id, cancel).await {
+            if error == "已取消。" {
+                *app.state::<AppState>().capture.lock().unwrap() = None;
+                let _ = native::on_main(&app, || {
+                    native::popup_hide();
+                    Ok(())
+                })
+                .await;
+            } else {
+                if let Some(capture) = app.state::<AppState>().capture.lock().unwrap().as_mut() {
+                    capture.replaceable = false;
+                }
+                let saved = app.state::<AppState>().capture.lock().unwrap().clone();
+                if saved.is_none() {
+                    let payload = json!({"id":id,"source":"","language":"","direct":false});
+                    let _ = native::on_main(&app, move || native::popup_show(&payload)).await;
+                }
+                let result = saved.and_then(|c| c.result);
+                let _ = popup_update(
+                    &app,
+                    json!({"id":id,"kind":"error","result":result,"complete":result.is_some(),
+                    "replaceable":false,"message":error}),
+                )
+                .await;
+            }
+        }
+        drop(busy);
+        let _ = app.emit("operation", json!({"busy":false}));
+    });
+}
+static APP: OnceLock<AppHandle> = OnceLock::new();
+extern "C" fn popup_action(action: i32, id: u64) {
+    let Some(app) = APP.get().cloned() else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    if id != state.sequence.load(Ordering::SeqCst) {
+        return;
+    }
+    if action == 1 || action == 4 {
+        state.cancel();
+        *state.capture.lock().unwrap() = None;
+        native::popup_hide(); // AppKit delivers the action on its main thread.
+        if action == 4 {
+            show(&app);
+        }
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = capture_flow(app.clone(), direct, delay).await {
-            if error == "当前操作尚未结束，请等待或取消。" {
-                return;
+        if let Err(error) = popup_result_action(&app, action, id).await {
+            if let Some(capture) = app
+                .state::<AppState>()
+                .capture
+                .lock()
+                .unwrap()
+                .as_mut()
+                .filter(|c| c.id == id)
+            {
+                capture.replaceable = false;
             }
-            event(&app, json!({"kind":"error", "message":error}));
-            if error != "已取消。" {
-                show(&app);
-            }
+            let complete = app
+                .state::<AppState>()
+                .capture
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|c| c.id == id && c.result.is_some());
+            let _ = popup_update(
+                &app,
+                json!({"id":id,"kind":"error","complete":complete,"replaceable":false,"message":error}),
+            )
+            .await;
         }
     });
+}
+async fn popup_result_action(app: &AppHandle, action: i32, id: u64) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let (_busy, cancel) = state.begin()?;
+    let capture = state
+        .capture
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|c| c.id == id)
+        .ok_or("原取词记录已失效，请重新触发快捷键。")?;
+    let result = capture.result.ok_or("译文尚未完整返回，请稍候。")?;
+    match action {
+        2 => {
+            native::on_main(app, move || native::copy(&result)).await?;
+            popup_update(app, json!({"id":id,"kind":"done","complete":true,"replaceable":capture.replaceable,"message":"译文已复制"})).await
+        }
+        3 if capture.replaceable => {
+            popup_update(app, json!({"id":id,"kind":"busy","complete":false,"replaceable":false,"message":"正在替换…"})).await?;
+            let replaced = native::on_main(app, move || {
+                if cancel.is_cancelled() {
+                    return Err("已取消。".into());
+                }
+                native::replace(&result)
+            })
+            .await?;
+            *state.capture.lock().unwrap() = None;
+            if replaced["verified"].as_bool() == Some(true) {
+                native::on_main(app, || {
+                    native::popup_hide();
+                    Ok(())
+                })
+                .await
+            } else {
+                popup_update(
+                    app,
+                    json!({"id":id,"kind":"error","complete":false,"replaceable":false,
+                    "message":"已发送粘贴，请在原应用确认；可按 ⌘Z 撤销。"}),
+                )
+                .await
+            }
+        }
+        _ => Err("此处不能替换，请复制译文。".into()),
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -284,6 +473,7 @@ async fn save_settings(
     *state.startup_error.lock().unwrap() = None;
     Ok(())
 }
+
 #[tauri::command]
 async fn accessibility_status(app: AppHandle) -> Result<bool, String> {
     native::on_main(&app, || native::permission(false)).await
@@ -300,79 +490,15 @@ async fn request_permission(app: AppHandle) -> Result<bool, String> {
     Ok(trusted)
 }
 #[tauri::command]
-fn capture_later(app: AppHandle) {
-    start_capture(app, false, true);
-}
-#[tauri::command]
 fn cancel_operation(state: State<'_, AppState>) {
-    if let Some(cancel) = state.cancellation.lock().unwrap().as_ref() {
-        cancel.cancel();
-    }
-}
-#[tauri::command]
-async fn translate_text(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    text: String,
-    language: String,
-    style: String,
-    capture_id: Option<u64>,
-) -> Result<Value, String> {
-    let (_busy, cancel) = state.begin()?;
-    translation::validate_text(&text)?;
-    if let Some(id) = capture_id {
-        if !state
-            .capture
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|capture| capture.id == id && capture.text == text)
-        {
-            return Err("取词记录已失效，请重新取词。".into());
-        }
-    } else {
-        *state.capture.lock().unwrap() = None;
-    }
-    let mut settings = state.settings();
-    settings.target_language = language;
-    settings.style = style;
-    settings.validate()?;
-    let result = api(&app, settings, &text, &cancel).await?;
-    Ok(json!({"result":result, "captureId":capture_id}))
+    state.cancel();
 }
 #[tauri::command]
 async fn test_api(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let (_busy, cancel) = state.begin()?;
-    api(&app, state.settings(), "你好，世界！", &cancel).await
-}
-#[tauri::command]
-async fn replace_result(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    capture_id: u64,
-    text: String,
-) -> Result<Value, String> {
-    let (_busy, _) = state.begin()?;
-    translation::validate_text(&text)?;
-    if !state
-        .capture
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|capture| capture.id == capture_id && capture.replaceable)
-    {
-        return Err("取词目标已失效或不可写，请重新取词或复制译文。".into());
-    }
-    let result = native::on_main(&app, move || native::replace(&text)).await?;
-    *state.capture.lock().unwrap() = None;
-    Ok(result)
-}
-#[tauri::command]
-async fn copy_text(app: AppHandle, state: State<'_, AppState>, text: String) -> Result<(), String> {
-    let (_busy, _) = state.begin()?;
-    native::on_main(&app, move || native::copy(&text))
-        .await
-        .map(|_| ())
+    let settings = state.settings();
+    let language = settings.foreign_language.clone();
+    api(&app, settings, "你好，世界！", &language, &cancel, None).await
 }
 pub fn run() {
     tauri::Builder::default()
@@ -382,11 +508,11 @@ pub fn run() {
                 .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         let settings = app.state::<AppState>().settings();
-                        if let Ok((read, replace)) = shortcuts(&settings) {
+                        if let Ok((read, write)) = shortcuts(&settings) {
                             if shortcut == &read {
-                                start_capture(app.clone(), false, false);
-                            } else if shortcut == &replace {
-                                start_capture(app.clone(), true, false);
+                                start_capture(app.clone(), Trigger::Read);
+                            } else if shortcut == &write {
+                                start_capture(app.clone(), Trigger::Write);
                             }
                         }
                     }
@@ -398,15 +524,14 @@ pub fn run() {
             save_settings,
             accessibility_status,
             request_permission,
-            capture_later,
             cancel_operation,
-            translate_text,
-            test_api,
-            replace_result,
-            copy_text
+            test_api
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let config_path = app.path().app_config_dir()?.join("settings.json");
+            let first_run = !config_path.exists();
             let (settings, load_error) = match Settings::load(&config_path) {
                 Ok(settings) => (settings, None),
                 Err(error) => (Settings::default(), Some(error)),
@@ -420,17 +545,23 @@ pub fn run() {
                 sequence: AtomicU64::new(0),
                 startup_error: Mutex::new(load_error),
             });
+            let _ = APP.set(app.handle().clone());
+            native::popup_init(popup_action);
             if let Err(error) = register_shortcuts(app.handle(), &settings) {
                 *app.state::<AppState>().startup_error.lock().unwrap() = Some(error);
             }
-            let open = MenuItem::with_id(app, "show", "打开 RustTide", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "show", "设置…", true, None::<&str>)?;
+            let cancel = MenuItem::with_id(app, "cancel", "取消当前翻译", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出 RustTide", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &cancel, &quit])?;
             let mut tray = TrayIconBuilder::new()
-                .tooltip("RustTide · Option+D 翻译 · Option+R 替换")
+                .tooltip("RustTide · 在当前输入框中翻译")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show(app),
+                    "cancel" => {
+                        app.state::<AppState>().cancel();
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 });
@@ -447,8 +578,43 @@ pub fn run() {
                     }
                 });
             }
+            if first_run
+                || app
+                    .state::<AppState>()
+                    .startup_error
+                    .lock()
+                    .unwrap()
+                    .is_some()
+            {
+                show(app.handle());
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("Unable to start RustTide");
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+    #[test]
+    fn refused_second_operation_preserves_first_token_and_busy_gate() {
+        let state = AppState {
+            settings: Mutex::new(Settings::default()),
+            config_path: PathBuf::new(),
+            capture: Mutex::new(None),
+            cancellation: Mutex::new(None),
+            busy: AtomicBool::new(false),
+            sequence: AtomicU64::new(0),
+            startup_error: Mutex::new(None),
+        };
+        let (guard, token) = state.begin().unwrap();
+        assert!(state.begin().is_err());
+        assert!(state.busy.load(Ordering::SeqCst));
+        state.cancel();
+        assert!(token.is_cancelled());
+        drop(guard);
+        assert!(!state.busy.load(Ordering::SeqCst));
+        assert!(state.begin().is_ok());
+    }
 }

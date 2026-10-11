@@ -13,6 +13,13 @@ extern "C" {
     fn rt_key_set(account: *const c_char, key: *const c_char) -> *mut c_char;
     fn rt_key_delete(account: *const c_char) -> *mut c_char;
     fn rt_system_proxy() -> *mut c_char;
+    fn rt_frontmost_bundle() -> *mut c_char;
+    fn rt_detect_language(text: *const c_char) -> *mut c_char;
+    fn rt_popup_init(handler: extern "C" fn(i32, u64));
+    fn rt_popup_show(payload: *const c_char);
+    fn rt_popup_update(payload: *const c_char);
+    fn rt_popup_hide();
+    fn rt_clear_capture();
 }
 #[cfg(target_os = "macos")]
 unsafe fn decode(value: *mut c_char) -> Result<Value, String> {
@@ -117,4 +124,58 @@ pub fn system_proxy() -> Result<Option<String>, String> {
     return unsafe { decode(rt_system_proxy()) }.map(|v| v["url"].as_str().map(str::to_string));
     #[cfg(not(target_os = "macos"))]
     Ok(None)
+}
+pub fn frontmost_bundle() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    return unsafe { decode(rt_frontmost_bundle()) }
+        .map(|v| v["bundle"].as_str().unwrap_or("").to_string());
+    #[cfg(not(target_os = "macos"))]
+    Err("此版本只支持 macOS。".into())
+}
+pub fn detect_language(text: &str) -> Result<String, String> {
+    let text = c_string(text)?;
+    #[cfg(target_os = "macos")]
+    return unsafe { decode(rt_detect_language(text.as_ptr())) }
+        .map(|v| v["language"].as_str().unwrap_or("").to_string());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Ok(String::new())
+    }
+}
+pub fn popup_init(handler: extern "C" fn(i32, u64)) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        rt_popup_init(handler);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = handler;
+}
+pub fn popup_show(value: &Value) -> Result<(), String> {
+    let value = c_string(&value.to_string())?;
+    #[cfg(target_os = "macos")]
+    unsafe {
+        rt_popup_show(value.as_ptr());
+    }
+    Ok(())
+}
+pub fn popup_update(value: &Value) -> Result<(), String> {
+    let value = c_string(&value.to_string())?;
+    #[cfg(target_os = "macos")]
+    unsafe {
+        rt_popup_update(value.as_ptr());
+    }
+    Ok(())
+}
+pub fn popup_hide() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        rt_popup_hide();
+    }
+}
+pub fn clear_capture() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        rt_clear_capture();
+    }
 }
